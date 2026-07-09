@@ -2,25 +2,23 @@
 # frozen_string_literal: true
 
 # Terminal Radio Player — ASCII-enhanced
-# Controls: [space]=Play/Pause, n=Next, p=Prev, +=Vol+, -=Vol-, a=Add station, s=Pick station, r=Remove, l=List, q=Quit
+# Controls: [space]=Play/Pause  n=Next  p=Prev  +=VolUp  -=VolDown
+#           s=Select  a=Add  r=Remove  l=List  A=Autoplay  R=Defaults  q=Quit
 # Persisted stations: ~/.terminal_radio/stations.yml
-# Requires external player: mpg123 (install with brew/apt/pacman/dnf)
-# Use bundler (optional) to install suggested gems in Gemfile.
+# Requires external player: mpg123 (brew install mpg123 / apt-get install mpg123)
+# Optional gems: artii, pastel, tty-box, tty-spinner (see Gemfile)
 
 begin
   require 'bundler/setup'
 rescue LoadError
-  # bundler not required; continue
 end
 
-# Optional/UX gems — graceful fallback if not installed
 begin
-  require 'artii'      # ASCII fonts
-  require 'pastel'     # colors
-  require 'tty-box'    # boxed sections
-  require 'tty-spinner' # spinner while loading
+  require 'artii'
+  require 'pastel'
+  require 'tty-box'
+  require 'tty-spinner'
 rescue LoadError
-  # We'll continue without those niceties if they aren't available
 end
 
 require 'io/console'
@@ -35,16 +33,25 @@ DEFAULT_STATIONS = [
   { name: 'SomaFM - Groove Salad', url: 'https://ice2.somafm.com/groovesalad-128-mp3' },
   { name: 'SomaFM - Illinois Street Lounge', url: 'https://ice6.somafm.com/illstreet-128-mp3' },
   { name: 'Radio Paradise (Main MP3 192k)', url: 'https://stream.radioparadise.com/mp3-192' },
-  { name: 'Radio Swiss Jazz (MP3 128k)', url: 'http://stream.srg-ssr.ch/m/rsj/mp3_128' }
+  { name: 'Radio Swiss Jazz (MP3 128k)', url: 'http://stream.srg-ssr.ch/m/rsj/mp3_128' },
+  { name: 'Playback FM', url: 'https://listen.radionomy.com/playbackfm' },
+  { name: 'K-Rose', url: 'https://listen.radionomy.com/k-rose' },
+  { name: 'K-DST', url: 'https://listen.radionomy.com/k-dst' },
+  { name: 'Bounce FM', url: 'https://listen.radionomy.com/bounce-fm' },
+  { name: 'SF-UR', url: 'https://listen.radionomy.com/sf-ur' },
+  { name: 'Radio Los Santos', url: 'https://listen.radionomy.com/radio-los-santos' },
+  { name: 'Radio X', url: 'https://listen.radionomy.com/radio-x' },
+  { name: 'CSR 103.9', url: 'https://listen.radionomy.com/csr-103-9' },
+  { name: 'Master Sounds 98.3', url: 'https://listen.radionomy.com/master-sounds-98-3' },
+  { name: 'WCTR Talk Radio', url: 'https://listen.radionomy.com/wctr-talk-radio' }
 ]
 
-# Helpers for optional UX
+# UX helpers
 module UX
   def self.artii(text)
     return text unless defined?(Artii)
-
     Artii::Base.new(asciify: true).asciify(text)
-  rescue StandardError
+  rescue
     text
   end
 
@@ -61,12 +68,11 @@ module UX
   end
 
   def self.spinner(message)
-    return unless defined?(TTY::Spinner)
-
-    TTY::Spinner.new("[:spinner] #{message}", format: :pulse)
+    defined?(TTY::Spinner) ? TTY::Spinner.new("[:spinner] #{message}", format: :pulse) : nil
   end
 end
 
+# Station persistence with defaults merged
 class StationStore
   def initialize(path)
     @path = path
@@ -79,34 +85,47 @@ class StationStore
   end
 
   def all
-    YAML.safe_load(File.read(@path), permitted_classes: [Symbol]) || []
-  rescue StandardError
-    []
+    saved = YAML.safe_load(File.read(@path), permitted_classes: [Symbol]) || []
+    merge_with_defaults(saved)
+  rescue
+    DEFAULT_STATIONS
   end
 
   def add(name, url)
     list = all
     list << { 'name' => name, 'url' => url }
-    File.write(@path, list.to_yaml)
+    save(list)
   end
 
   def save(list)
     File.write(@path, list.to_yaml)
   end
+
+  def restore_defaults
+    save(DEFAULT_STATIONS.map { |s| { 'name' => s[:name], 'url' => s[:url] } })
+  end
+
+  private
+
+  def merge_with_defaults(saved)
+    names = saved.map { |s| s['name'] }
+    merged = saved.dup
+    DEFAULT_STATIONS.each do |d|
+      next if names.include?(d[:name])
+      merged << { 'name' => d[:name], 'url' => d[:url] }
+    end
+    merged
+  end
 end
 
+# mpg123 remote control wrapper
 class Mpg123Remote
-  attr_reader :proc_in, :proc_out
-
   def initialize
-    return if which('mpg123')
-
-    abort 'mpg123 not found. Please install it first (e.g., brew install mpg123 or apt-get install mpg123).'
+    abort 'mpg123 not found. Please install it first.' unless which('mpg123')
   end
 
   def start
     @proc_in, @proc_out, @wait_thr = Open3.popen2('mpg123', '-R')
-    # drain initial banner (from stdout)
     Thread.new do
       while (line = @proc_out.gets)
         break if line.strip.empty?
@@ -115,28 +134,15 @@ class Mpg123Remote
     end
   end
 
-  def load(url)
-    send_cmd("LOAD #{url}")
-  end
-
-  def pause
-    send_cmd('PAUSE')
-  end
-
-  def stop
-    send_cmd('STOP')
-  end
-
+  def load(url)  = send_cmd("LOAD #{url}")
+  def pause      = send_cmd('PAUSE')
+  def stop       = send_cmd('STOP')
+  def volume(p)  = send_cmd("VOLUME #{[[p,0].max,100].min}")
   def quit
     send_cmd('QUIT')
     @proc_in.close unless @proc_in.closed?
     @proc_out.close unless @proc_out.closed?
     @wait_thr.value if @wait_thr
-  end
-
-  def volume(percent)
-    percent = [[percent, 0].max, 100].min
-    send_cmd("VOLUME #{percent}")
   end
 
   def on_lines(&block)
@@ -158,7 +164,6 @@ class Mpg123Remote
     @proc_in.puts(cmd)
     @proc_in.flush
   rescue Errno::EPIPE
-    # player died
   end
 
   def which(cmd)
@@ -191,44 +196,20 @@ class TerminalRadio
     @player.on_lines { |line| handle_player_line(line) }
     set_volume(@volume)
     play_current
-
     input_loop
   ensure
     @player.stop_reader
-    begin
-      @player.quit
-    rescue StandardError
-      nil
-    end
+    @player.quit rescue nil
     puts "\nBye! 👋"
   end
 
   private
 
   def normalize(list)
-    list.map do |s|
-      {
-        'name' => s['name'] || s[:name],
-        'url' => s['url'] || s[:url]
-      }
-    end
+    list.map { |s| { 'name' => s['name'] || s[:name], 'url' => s['url'] || s[:url] } }
   end
 
-  def print_banner
-    header = if defined?(Artii)
-               UX.artii('Terminal Radio')
-             else
-               '*** Terminal Radio ***'
-             end
-
-    puts header
-    puts UX.box('Controls: [space]=Play/Pause  n=Next  p=Prev  +=VolUp  -=VolDown  s=Select  a=Add  r=Remove  l=List  q=Quit')
-    puts
-  end
-
-  def clear
-    print "\e[2J\e[H"
-  end
+  def clear = print "\e[2J\e[H"
 
   def status_line
     cur = @stations[@index]
@@ -236,17 +217,11 @@ class TerminalRadio
     now = @now_playing ? " | #{@now_playing}" : ''
     vol = "Vol: #{@volume}%"
     base = "#{@index + 1}/#{@stations.size}: #{name}#{now}  | #{vol}"
-    return base unless @pastel
-
-    @pastel.decorate(base, :bold)
+    @pastel ? @pastel.decorate(base, :bold) : base
   end
 
   def redraw_status
-    width = begin
-      IO.console.winsize[1]
-    rescue StandardError
-      120
-    end
+    width = IO.console.winsize[1] rescue 120
     print "\r#{' ' * width}\r"
     print status_line
     $stdout.flush
@@ -262,19 +237,9 @@ class TerminalRadio
     redraw_status
   end
 
-  def toggle_pause
-    @player.pause
-  end
-
-  def next_station
-    @index = (@index + 1) % @stations.size
-    play_current
-  end
-
-  def prev_station
-    @index = (@index - 1) % @stations.size
-    play_current
-  end
+  def toggle_pause = @player.pause
+  def next_station = (@index = (@index + 1) % @stations.size; play_current)
+  def prev_station = (@index = (@index - 1) % @stations.size; play_current)
 
   def set_volume(v)
     @volume = [[v, 0].max, 100].min
@@ -284,18 +249,13 @@ class TerminalRadio
 
   def pick_station
     puts "\n"
-    content = @stations.each_with_index.map do |s, i|
-      marker = (i == @index ? '*' : ' ')
-      "#{marker} #{i + 1}. #{s['name']}"
-    end.join("\n")
-
+    content = @stations.each_with_index.map { |s, i| "#{i == @index ? '*' : ' '} #{i + 1}. #{s['name']}" }.join("\n")
     puts UX.box(content)
     print "\nNumber (or blank to cancel): "
     choice = STDIN.gets&.strip
     return if choice.nil? || choice.empty?
-
     num = choice.to_i
-    if num >= 1 && num <= @stations.size
+    if num.between?(1, @stations.size)
       @index = num - 1
       play_current
     else
@@ -304,14 +264,10 @@ class TerminalRadio
   end
 
   def add_station
-    print "\nStation name: "
-    name = STDIN.gets&.strip
+    print "\nStation name: "; name = STDIN.gets&.strip
     return if name.nil? || name.empty?
-
-    print 'Stream URL (MP3/AAC recommended): '
-    url = STDIN.gets&.strip
+    print 'Stream URL: '; url = STDIN.gets&.strip
     return if url.nil? || url.empty?
-
     @store.add(name, url)
     @stations = normalize(@store.all)
     @index = @stations.size - 1
@@ -323,7 +279,6 @@ class TerminalRadio
     puts "\nEnter number to remove (1-#{@stations.size}):"
     n = STDIN.gets&.strip&.to_i
     return if n.nil? || n <= 0 || n > @stations.size
-
     removed = @stations.delete_at(n - 1)
     @store.save(@stations)
     @index = [[@index, @stations.size - 1].min, 0].max
@@ -337,12 +292,32 @@ class TerminalRadio
       marker = (i == @index ? '*' : ' ')
       "#{marker} #{i + 1}. #{s['name']} (#{s['url']})"
     end.join("\n")
-    puts UX.box(content, width: begin
-      IO.console.winsize[1]
-    rescue StandardError
-      80
-    end)
+    width = IO.console.winsize[1] rescue 80
+    puts UX.box(content, width: width)
     puts "----------------\n"
+  end
+
+  def play_all
+    Thread.new do
+      loop do
+        play_current
+        sleep 60
+        next_station
+      end
+    end
+  end
+
+  def restore_defaults
+    confirm = nil
+    print "\nThis will reset your stations to defaults. Continue? (y/N): "
+    confirm = STDIN.gets&.strip&.downcase
+    return unless confirm == 'y'
+
+    @store.restore_defaults
+    @stations = normalize(@store.all)
+    @index = 0
+    play_current
+    puts "Defaults restored."
   end
 
   def input_loop
@@ -351,32 +326,30 @@ class TerminalRadio
         redraw_status
         ch = STDIN.getch
         case ch
-        when 'q', "\u0003" # Ctrl-C
-          break
-        when ' ', 'k' # toggle pause
-          toggle_pause
-        when 'n', "\e[C" # right arrow
-          next_station
-        when 'p', "\e[D" # left arrow
-          prev_station
-        when '+', '='
-          set_volume(@volume + 5)
-        when '-', '_'
-          set_volume(@volume - 5)
-        when 's'
-          print "\n"
-          pick_station
-        when 'a'
-          add_station
-        when 'r'
-          remove_station
-        when 'l'
-          list_stations
-        else
-          # ignore
+        when 'q', "\u0003" then break
+        when ' ', 'k'       then toggle_pause
+        when 'n', "\e[C"    then next_station
+        when 'p', "\e[D"    then prev_station
+        when '+', '='       then set_volume(@volume + 5)
+        when '-', '_'       then set_volume(@volume - 5)
+        when 's'            then print "\n"; pick_station
+        when 'a'            then add_station
+        when 'r'            then remove_station
+        when 'l'            then list_stations
+        when 'A'            then puts "\nAutoplaying all stations..."; play_all
+        when 'R'            then restore_defaults
         end
       end
     end
+  end
+
+  def print_banner
+    puts defined?(Artii) ? UX.artii('Terminal Radio') : '*** Terminal Radio ***'
+    puts UX.box(
+      'Controls: [space]=Play/Pause  n=Next  p=Prev  +=VolUp  -=VolDown  ' \
+      's=Select  a=Add  r=Remove  l=List  A=Autoplay  R=RestoreDefaults  q=Quit'
+    )
+    puts
   end
 
   def handle_player_line(line)
